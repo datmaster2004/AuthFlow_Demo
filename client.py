@@ -1,354 +1,570 @@
-from flask import Flask, request, jsonify, make_response
-import pymongo, hashlib, os, pyotp
-from datetime import datetime, timedelta
-import jwt  
-import smtplib
-from email.mime.text import MIMEText
-from twilio.rest import Client
+import tkinter as tk
+from tkinter import filedialog, messagebox
+from PIL import Image
+import pytesseract
+import requests
+import re
 
-app = Flask(__name__)
-app.config["SECRET_KEY"] = "Hai_la_s0_1"  
+BASE_URL = "http://localhost:3000"
+pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 
-client = pymongo.MongoClient("mongodb://localhost:27017/")
-db = client["authflow_demo"]
-EMAIL_CONFIG = {
-    'sender': 'datmaster200418@gmail.com',
-    'password': 'qwwc bgvf jdte aqax',  
-    'smtp_server': 'smtp.gmail.com',
-    'smtp_port': 587
-}
 
-TWILIO_ACCOUNT_SID = "AC9edd7213e48058ec7fd5747cf08530c5"
-TWILIO_AUTH_TOKEN = "a2514a624067bf60a3ccd234087514b5"
-TWILIO_VERIFY_SERVICE_SID = "VA34ccf4aa3f2c0365be87d57b7a17d5dd"
-
-twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-
-@app.route("/register", methods=["POST"])
-def register():
-    data = request.get_json()
-    
-    required_fields = ["username", "password", "fullname", "phone", "email"]
-    if not all(field in data for field in required_fields):
-        return jsonify({"error": "Thiếu thông tin bắt buộc"}), 400
-
-    if db.users.find_one({"$or": [{"username": data["username"]}, {"email": data["email"]}]}):
-        return jsonify({"error": "Tên đăng nhập hoặc email đã tồn tại"}), 400
-
-    # Tạo OTP
-    otp_secret = pyotp.random_base32()
-    otp = pyotp.TOTP(otp_secret).now()
-    
-    # Lưu tạm thông tin
-    db.temp_users.insert_one({
-        "username": data["username"],
-        "password": data["password"],  # Lưu tạm chưa hash
-        "fullname": data["fullname"],
-        "phone": data["phone"],
-        "email": data["email"],
-        "otp": otp,
-        "expires_at": datetime.now() + timedelta(minutes=5)
-    })
-
-    # Gửi OTP
-    send_otp(data["email"], otp)
-
-    return jsonify({"message": "OTP đã được gửi đến email"}), 200
-def send_otp(email, otp):
-    try:
-        msg = MIMEText(f'Mã OTP của bạn là: {otp}\nMã có hiệu lực trong 5 phút.')
-        msg['Subject'] = 'Mã xác thực AuthFlow Demo'
-        msg['From'] = EMAIL_CONFIG['sender']
-        msg['To'] = email
+class AuthFlowApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("AuthFlow Demo")
+        self.root.geometry("500x600")  
         
-        with smtplib.SMTP(EMAIL_CONFIG['smtp_server'], EMAIL_CONFIG['smtp_port']) as server:
-            server.starttls()
-            server.login(EMAIL_CONFIG['sender'], EMAIL_CONFIG['password'])
-            server.send_message(msg)
-        print(f"[SUCCESS] Đã gửi OTP đến {email}")
-        return True
-    except Exception as e:
-        print(f"[ERROR] Lỗi gửi email: {str(e)}")
-        return False
-@app.route("/save-user-info", methods=["POST"])
-def save_user_info():
-    data = request.get_json()
-    email = data.get("email")
-    fullname = data.get("fullname")
-    phone = data.get("phone")
+        self.current_username = ""
+        self.password = ""
+        self.current_email = ""
+        self.current_token = ""
+        self.show_main_screen()
 
-    if not all([email, fullname, phone]):
-        return jsonify({"error": "Thiếu thông tin bắt buộc"}), 400
+    # ------------------------------- Các hàm gọi API ------------------SS----------------------------------------------------------
+    def register(self, user_data):
+        response = requests.post(
+            f"{BASE_URL}/register",
+            json=user_data  
+        )
+        return response.json(), response.status_code
+
+    def send_phone_otp(self):
+        """Gửi OTP tới số điện thoại"""
+        try:
+            response = requests.post(
+                f"{BASE_URL}/send-phone-otp",
+                headers={"Authorization": f"Bearer {self.current_token}"}
+            )
+            return response.json(), response.status_code
+        except requests.exceptions.RequestException as e:
+            return {"error": f"Connection error: {str(e)}"}, 500
+
+    def verify_phone_otp(self, otp_code):
+        """Xác minh OTP người dùng nhập"""
+        try:
+            response = requests.post(
+                f"{BASE_URL}/verify-phone-otp",
+                headers={"Authorization": f"Bearer {self.current_token}"},
+                json={"otp": otp_code}
+            )
+            return response.json(), response.status_code
+        except requests.exceptions.RequestException as e:
+            return {"error": f"Connection error: {str(e)}"}, 500
 
 
-    db.users.update_one(
-        {"email": email},
-        {"$set": {"fullname": fullname, "phone": phone}}
-    )
+    def verify_otp(self, otp_data):
+            try:
+                response = requests.post(
+                    f"{BASE_URL}/verify-otp",
+                    json=otp_data,
+                    timeout=5  
+                )
+                
+                if not response.text:
+                    return {"error": "Empty response from server"}, 500
+                    
+                return response.json(), response.status_code
+                
+            except requests.exceptions.RequestException as e:
+                return {"error": f"Connection error: {str(e)}"}, 500
 
-    return jsonify({"message": "Cập nhật thông tin thành công"}), 200
-# API Đăng nhập
-@app.route("/login", methods=["POST"])
-def login():
-    data = request.get_json()
-    username = data.get("username")  
-    password = data.get("password")
-
-    user = db.users.find_one({"username": username})
-    if not user:
-        return jsonify({"error": "Tên đăng nhập không tồn tại"}), 404
-
-    salt = bytes.fromhex(user["salt"])
-    hashed_input = hashlib.pbkdf2_hmac(
-        "sha256",
-        password.encode(),
-        salt,
-        100000
-    )
+    def login(self, username, password):  
+        response = requests.post(
+            f"{BASE_URL}/login",
+            json={"username": username, "password": password}  
+        )
+        return response.json(), response.status_code
+    def save_user_info(self, email, fullname, phone):
+        """Gọi API lưu thông tin người dùng"""
+        response = requests.post(
+            f"{BASE_URL}/save-user-info",
+            json={"email": email, "fullname": fullname, "phone": phone}
+        )
+        return response.json(), response.status_code
+    def logout(self):
+        """Xử lý đăng xuất"""
+        self.current_token = ""
+        messagebox.showinfo("Thông báo", "Đăng xuất thành công")
+        self.show_main_screen()
     
-    if hashed_input.hex() != user["password"]:
-        return jsonify({"error": "Mật khẩu không đúng"}), 401
-    token = jwt.encode({
-        "username": username,  
-        "exp": datetime.now() + timedelta(hours=1)
-    }, app.config["SECRET_KEY"], algorithm="HS256")
 
-    return jsonify({
-        "token": token,
-        "username": username  
-    }), 200
-@app.route("/verify-otp", methods=["POST"])
-def verify_otp():
-    try:
-        data = request.get_json()
-        if not data:
-            return jsonify({"error": "Invalid JSON"}), 400
-
-        username = data.get("username")
-        otp = data.get("otp")
-
-        if not username or not otp:
-            return jsonify({"error": "Thiếu username hoặc OTP"}), 400
-
-        # Kiểm tra OTP trong temp_users
-        record = db.temp_users.find_one({
-            "username": username,
-            "otp": otp,
-            "expires_at": {"$gt": datetime.now()}
-        })
+    # ------------------------ Các hàm xử lý giao diện -------------------------------------------------------------------------
+    def show_main_screen(self):
+        """Màn hình chính với 2 nút Đăng nhập và Đăng ký"""
+        self.clear_screen()
         
-        if not record:
-            return jsonify({"error": "OTP không hợp lệ hoặc hết hạn"}), 400
+        tk.Label(self.root, text="Chào mừng đến với AuthFlow Demo", font=("Arial", 14)).pack(pady=20)
+        
+        tk.Button(
+            self.root,
+            text="Đăng nhập",
+            command=self.show_login_screen,
+            width=15,
+            height=2
+        ).pack(pady=10)
+        
+        tk.Button(
+            self.root,
+            text="Đăng ký",
+            command=self.show_register_screen,
+            width=15,
+            height=2
+        ).pack(pady=10)
 
-        # Hash password và lưu user
-        salt = os.urandom(16)
-        hashed_password = hashlib.pbkdf2_hmac(
-            "sha256",
-            record["password"].encode(),
-            salt,
-            100000
+    def show_register_screen(self):
+        self.clear_screen()
+        
+        tk.Label(self.root, text="ĐĂNG KÝ TÀI KHOẢN", font=("Arial", 14)).pack(pady=10)
+        
+        # Thông tin đăng nhập
+        tk.Label(self.root, text="Tên đăng nhập:").pack()
+        self.username_entry = tk.Entry(self.root, width=30)
+        self.username_entry.pack(pady=5)
+        
+        tk.Label(self.root, text="Mật khẩu:").pack()
+        self.password_entry = tk.Entry(self.root, show="*", width=30)
+        self.password_entry.pack(pady=5)
+        
+        # Thông tin cá nhân
+        tk.Label(self.root, text="Họ và tên:").pack()
+        self.fullname_entry = tk.Entry(self.root, width=30)
+        self.fullname_entry.pack(pady=5)
+        
+        tk.Label(self.root, text="Số điện thoại:").pack()
+        self.phone_entry = tk.Entry(self.root, width=30)
+        self.phone_entry.pack(pady=5)
+        
+        tk.Label(self.root, text="Email:").pack()
+        self.email_entry = tk.Entry(self.root, width=30)
+        self.email_entry.pack(pady=5)
+        
+        tk.Button(
+            self.root,
+            text="Tiếp tục",
+            command=self.handle_register,
+            width=15
+        ).pack(pady=15)
+    def show_verify_otp_screen(self):
+        self.clear_screen()
+        
+        tk.Label(self.root, text="XÁC THỰC OTP", font=("Arial", 14)).pack(pady=10)
+        tk.Label(self.root, text=f"Mã OTP đã gửi đến {self.current_email}").pack()
+        
+        tk.Label(self.root, text="Nhập mã OTP:").pack()
+        self.otp_entry = tk.Entry(self.root, width=30)
+        self.otp_entry.pack(pady=10)
+        
+        tk.Button(
+            self.root,
+            text="Xác thực",
+            command=self.handle_verify_otp,
+            width=15
+        ).pack(pady=10)
+
+    def show_login_screen(self):
+        self.clear_screen()
+        
+        tk.Label(self.root, text="ĐĂNG NHẬP", font=("Arial", 12)).pack(pady=10)
+        
+        tk.Label(self.root, text="Tên đăng nhập:").pack() 
+        self.login_username_entry = tk.Entry(self.root, width=30)  
+        self.login_username_entry.pack(pady=5)
+        
+        tk.Label(self.root, text="Mật khẩu:").pack()
+        self.login_password_entry = tk.Entry(self.root, show="*", width=30)
+        self.login_password_entry.pack(pady=5)
+        
+        tk.Button(
+            self.root,
+            text="Đăng nhập",
+            command=self.handle_login,
+            width=15
+        ).pack(pady=10)
+        
+        tk.Button(
+            self.root,
+            text="Quay lại",
+            command=self.show_main_screen,
+            width=10
+        ).pack(pady=5)
+    
+    def show_user_info_screen(self):
+        """Màn hình nhập thông tin cá nhân sau khi xác thực OTP"""
+        self.clear_screen()
+        
+        tk.Label(self.root, text="THÔNG TIN CÁ NHÂN", font=("Arial", 12)).pack(pady=10)
+        
+        tk.Label(self.root, text="Họ và tên:").pack()
+        self.fullname_entry = tk.Entry(self.root, width=30)
+        self.fullname_entry.pack(pady=5)
+        
+        tk.Label(self.root, text="Số điện thoại:").pack()
+        self.phone_entry = tk.Entry(self.root, width=30)
+        self.phone_entry.pack(pady=5)
+        
+        tk.Button(
+            self.root,
+            text="Lưu thông tin",
+            command=self.handle_save_user_info,
+            width=15
+        ).pack(pady=10)
+
+    def verify_phone(self):
+        """Gọi API xác nhận số điện thoại"""
+        try:
+            response = requests.post(
+                f"{BASE_URL}/verify-phone",
+                headers={"Authorization": f"Bearer {self.current_token}"}
+            )
+            if not response.text:
+                return {"error": "Empty response from server"}, 500
+            return response.json(), response.status_code
+        except requests.exceptions.RequestException as e:
+            return {"error": f"Connection error: {str(e)}"}, 500
+
+
+    def show_home_screen(self):
+        """Màn hình trang chủ sau khi đăng nhập"""
+        self.clear_screen()
+        
+        tk.Label(self.root, text="TRANG CHỦ", font=("Arial", 16, "bold")).pack(pady=20)
+        
+        # Nút xem thông tin cá nhân
+        tk.Button(
+            self.root,
+            text="Xem thông tin cá nhân",
+            command=self.show_profile_screen,
+            width=20,
+            height=2
+        ).pack(pady=10)
+        
+        # Nút đổi mật khẩu
+        tk.Button(
+            self.root,
+            text="Đổi mật khẩu",
+            command=self.show_change_password_screen,
+            width=20,
+            height=2
+        ).pack(pady=10)
+        
+        # Nút xác nhận số điện thoại
+        tk.Button(
+            self.root,
+            text="Xác nhận số điện thoại",
+            command=self.handle_verify_phone,
+            width=20,
+            height=2
+        ).pack(pady=10)
+        
+        tk.Button(
+            self.root,
+            text="Xác nhận CCCD",
+            command=self.show_cccd_verification_screen,
+            width=20,
+            height=2
+        ).pack(pady=10)
+        
+        # Nút đăng xuất
+        tk.Button(
+            self.root,
+            text="Đăng xuất",
+            command=self.logout,
+            width=20,
+            height=2,
+            fg="red"
+        ).pack(pady=10)
+
+        
+
+
+    def show_profile_screen(self):
+        """Màn hình xem thông tin cá nhân"""
+        self.clear_screen()
+        
+        # Gọi API lấy thông tin user (cần implement endpoint /profile trong server)
+        response = requests.get(
+            f"{BASE_URL}/profile",
+            headers={"Authorization": f"Bearer {self.current_token}"}
         )
         
-        db.users.insert_one({
-            "username": record["username"],
-            "password": hashed_password.hex(),
-            "salt": salt.hex(),
-            "fullname": record["fullname"],
-            "phone": record["phone"],
-            "email": record["email"]
-        })
-
-        # Xóa bản ghi tạm
-        db.temp_users.delete_one({"_id": record["_id"]})
-
-        return jsonify({"message": "Xác thực thành công"}), 200
-
-    except Exception as e:
-        return jsonify({"error": f"Lỗi server: {str(e)}"}), 500
-    
-@app.route("/send-phone-otp", methods=["POST"])
-def send_phone_otp():
-    token = request.headers.get("Authorization")
-    if not token or not token.startswith("Bearer "):
-        return jsonify({"error": "Unauthorized"}), 401
-
-    try:
-        token = token.split(" ")[1]
-        payload = jwt.decode(token, app.config["SECRET_KEY"], algorithms=["HS256"])
-        username = payload["username"]
-
-        user = db.users.find_one({"username": username})
-        if not user:
-            return jsonify({"error": "User not found"}), 404
-
-        phone = user.get("phone")
-        if not phone:
-            return jsonify({"error": "Chưa có số điện thoại"}), 400
-
-        verification = twilio_client.verify.services(TWILIO_VERIFY_SERVICE_SID).verifications.create(
-            to=phone,
-            channel='sms'
-        )
-
-        return jsonify({"message": "OTP đã gửi tới số điện thoại"}), 200
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/verify-phone-otp", methods=["POST"])
-def verify_phone_otp():
-    token = request.headers.get("Authorization")
-    if not token or not token.startswith("Bearer "):
-        return jsonify({"error": "Unauthorized"}), 401
-
-    try:
-        data = request.get_json()
-        entered_otp = data.get("otp")
-
-        token = token.split(" ")[1]
-        payload = jwt.decode(token, app.config["SECRET_KEY"], algorithms=["HS256"])
-        username = payload["username"]
-
-        user = db.users.find_one({"username": username})
-        if not user:
-            return jsonify({"error": "User not found"}), 404
-
-        phone = user.get("phone")
-
-        verification_check = twilio_client.verify.services(TWILIO_VERIFY_SERVICE_SID).verification_checks.create(
-            to=phone,
-            code=entered_otp
-        )
-
-        if verification_check.status == "approved":
-            return jsonify({"message": "Xác nhận số điện thoại thành công!"}), 200
+        if response.status_code == 200:
+            user_data = response.json()
+            
+            tk.Label(self.root, text="THÔNG TIN CÁ NHÂN", font=("Arial", 14)).pack(pady=10)
+            
+            # Hiển thị thông tin
+            info_labels = [
+                f"Tên đăng nhập: {user_data.get('username', '')}",
+                f"Họ và tên: {user_data.get('fullname', '')}",
+                f"Email: {user_data.get('email', '')}",
+                f"Số điện thoại: {user_data.get('phone', '')}"
+            ]
+            
+            for label_text in info_labels:
+                tk.Label(self.root, text=label_text, font=("Arial", 12)).pack(anchor="w", padx=20, pady=5)
+        
         else:
-            return jsonify({"error": "OTP không đúng"}), 400
+            messagebox.showerror("Lỗi", "Không thể tải thông tin")
+        
+        tk.Button(
+            self.root,
+            text="Quay lại",
+            command=self.show_home_screen,
+            width=15
+        ).pack(pady=20)
 
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-            
-@app.after_request
-def after_request(response):
-    response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
-    response.headers.add('Access-Control-Allow-Methods', 'POST, OPTIONS')
-    return response
-@app.route("/profile", methods=["GET"])
-def get_profile():
-    token = request.headers.get("Authorization")
-    if not token or not token.startswith("Bearer "):
-        return jsonify({"error": "Unauthorized"}), 401
+    def show_change_password_screen(self):
+        """Màn hình đổi mật khẩu"""
+        self.clear_screen()
+        
+        tk.Label(self.root, text="ĐỔI MẬT KHẨU", font=("Arial", 14)).pack(pady=10)
+        
+        tk.Label(self.root, text="Mật khẩu hiện tại:").pack()
+        self.current_password_entry = tk.Entry(self.root, show="*", width=30)
+        self.current_password_entry.pack(pady=5)
+        
+        tk.Label(self.root, text="Mật khẩu mới:").pack()
+        self.new_password_entry = tk.Entry(self.root, show="*", width=30)
+        self.new_password_entry.pack(pady=5)
+        
+        tk.Label(self.root, text="Nhập lại mật khẩu mới:").pack()
+        self.confirm_password_entry = tk.Entry(self.root, show="*", width=30)
+        self.confirm_password_entry.pack(pady=5)
+        
+        tk.Button(
+            self.root,
+            text="Xác nhận",
+            command=self.handle_change_password,
+            width=15
+        ).pack(pady=10)
+        
+        tk.Button(
+            self.root,
+            text="Quay lại",
+            command=self.show_home_screen,
+            width=10
+        ).pack(pady=5)
     
-    try:
-        token = token.split(" ")[1]
-        payload = jwt.decode(token, app.config["SECRET_KEY"], algorithms=["HS256"])
-        username = payload["username"]
-        
-        user = db.users.find_one({"username": username}, {"_id": 0, "password": 0, "salt": 0})
-        if not user:
-            return jsonify({"error": "User not found"}), 404
-            
-        return jsonify(user), 200
-        
-    except jwt.ExpiredSignatureError:
-        return jsonify({"error": "Token expired"}), 401
-    except jwt.InvalidTokenError:
-        return jsonify({"error": "Invalid token"}), 401
-
-
-@app.route("/change-password", methods=["POST"])
-def change_password():
-    token = request.headers.get("Authorization")
-    if not token or not token.startswith("Bearer "):
-        return jsonify({"error": "Unauthorized"}), 401
     
-    try:
-        token = token.split(" ")[1]
-        payload = jwt.decode(token, app.config["SECRET_KEY"], algorithms=["HS256"])
-        username = payload["username"]
-        data = request.get_json()
+    # -------------------------------------Các hàm xử lý sự kiện ---------------------------------------------------------------------------------
+    def clear_screen(self):
+        """Xóa toàn bộ widget hiện có"""
+        for widget in self.root.winfo_children():
+            widget.destroy()
+    def handle_register(self):
+        user_data = {
+        "username": self.username_entry.get(),
+        "password": self.password_entry.get(),
+        "fullname": self.fullname_entry.get(),
+        "phone": self.phone_entry.get(),
+        "email": self.email_entry.get()
+    }
+        response, status_code = self.register(user_data)
+        self.current_email = user_data["email"]
+        if status_code == 200:
+            self.current_username = user_data["username"]
+            self.show_verify_otp_screen()
+        else:
+            messagebox.showerror("Lỗi", response.get("error", "Đăng ký thất bại"))
+
+    def handle_verify_otp(self):
+        otp_data = {
+            "username": self.current_username,
+            "otp": self.otp_entry.get()
+        }
         
-        user = db.users.find_one({"username": username})
-        if not user:
-            return jsonify({"error": "User not found"}), 404
-            
-        salt = bytes.fromhex(user["salt"])
-        hashed_input = hashlib.pbkdf2_hmac(
-            "sha256",
-            data["current_password"].encode(),
-            salt,
-            100000
+        response, status_code = self.verify_otp(otp_data)
+        
+        if status_code == 200:
+            messagebox.showinfo("Thành công", response.get("message", "Xác thực thành công!"))
+            self.show_login_screen()
+        else:
+            error_msg = response.get("error", "Xác thực thất bại")
+            messagebox.showerror("Lỗi", error_msg)
+    def handle_save_user_info(self):
+        """Xử lý lưu thông tin cá nhân"""
+        fullname = self.fullname_entry.get()
+        phone = self.phone_entry.get()
+
+        if not fullname or not phone:
+            messagebox.showerror("Lỗi", "Vui lòng nhập đầy đủ thông tin")
+            return
+
+        response, status_code = self.save_user_info(self.email, fullname, phone)
+        if status_code == 200:
+            messagebox.showinfo("Thành công", "Đăng ký hoàn tất!")
+            self.show_login_screen()
+        else:
+            messagebox.showerror("Lỗi", response.get("error", "Lỗi khi lưu thông tin"))
+    def handle_login(self):
+        """Sửa lại hàm xử lý đăng nhập"""
+        username = self.login_username_entry.get()
+        password = self.login_password_entry.get()
+        
+        response, status_code = self.login(username, password)
+        if status_code == 200:
+            self.current_token = response["token"]  
+            messagebox.showinfo("Thành công", "Đăng nhập thành công!")
+            self.show_home_screen()  
+        else:
+            messagebox.showerror("Lỗi", response.get("error", "Đăng nhập thất bại"))
+    def handle_change_password(self):
+        """Xử lý đổi mật khẩu"""
+        current_pass = self.current_password_entry.get()
+        new_pass = self.new_password_entry.get()
+        confirm_pass = self.confirm_password_entry.get()
+        
+        if new_pass != confirm_pass:
+            messagebox.showerror("Lỗi", "Mật khẩu mới không khớp")
+            return
+        response = requests.post(
+            f"{BASE_URL}/change-password",
+            headers={"Authorization": f"Bearer {self.current_token}"},
+            json={
+                "current_password": current_pass,
+                "new_password": new_pass
+            }
         )
         
-        if hashed_input.hex() != user["password"]:
-            return jsonify({"error": "Current password is incorrect"}), 400
+        if response.status_code == 200:
+            messagebox.showinfo("Thành công", "Đổi mật khẩu thành công")
+            self.show_home_screen()
+        else:
+            messagebox.showerror("Lỗi", response.json().get("error", "Đổi mật khẩu thất bại"))
+
+    def handle_verify_phone(self):
+        """Xử lý xác nhận số điện thoại qua OTP"""
+        send_response, send_status = self.send_phone_otp()
+        if send_status != 200:
+            messagebox.showerror("Lỗi", send_response.get("error", "Không thể gửi OTP"))
+            return
+
+        # Mở cửa sổ nhập OTP
+        otp_window = tk.Toplevel(self.root)
+        otp_window.title("Nhập mã OTP")
+        otp_window.geometry("300x150")
+
+        tk.Label(otp_window, text="Nhập mã OTP (6 số):").pack(pady=10)
+        otp_entry = tk.Entry(otp_window, width=20)
+        otp_entry.pack(pady=5)
+
+        def submit_otp():
+            otp_code = otp_entry.get()
+            verify_response, verify_status = self.verify_phone_otp(otp_code)
+            if verify_status == 200:
+                messagebox.showinfo("Thành công", verify_response.get("message", "Xác nhận số điện thoại thành công"))
+                otp_window.destroy()
+            else:
+                messagebox.showerror("Lỗi", verify_response.get("error", "OTP sai. Vui lòng nhập lại."))
+
+        tk.Button(otp_window, text="Xác thực", command=submit_otp).pack(pady=10)
+
+    def show_cccd_verification_screen(self):
+        """Màn hình tải ảnh và xác nhận CCCD"""
+        self.clear_screen()
         
-        new_salt = os.urandom(16)
-        new_hashed_password = hashlib.pbkdf2_hmac(
-            "sha256",
-            data["new_password"].encode(),
-            new_salt,
-            100000
+        tk.Label(self.root, text="Xác thực CCCD", font=("Arial", 14)).pack(pady=10)
+        
+        # Nút để chọn ảnh CCCD
+        tk.Button(
+            self.root,
+            text="Chọn ảnh CCCD",
+            command=self.upload_cccd_image,
+            width=20,
+            height=2
+        ).pack(pady=20)
+
+        tk.Button(
+            self.root,
+            text="Quay lại",
+            command=self.show_home_screen,
+            width=20,
+            height=2
+        ).pack(pady=10)
+
+    def upload_cccd_image(self):
+        """Cho phép người dùng chọn ảnh và thực hiện xác thực"""
+        # Mở cửa sổ để người dùng chọn ảnh
+        file_path = filedialog.askopenfilename(title="Chọn ảnh CCCD", filetypes=[("Image files", "*.png;*.jpg;*.jpeg")])
+        
+        if file_path:
+            # Trích xuất văn bản từ ảnh bằng OCR
+            cccd = self.extract_cccd_from_image(file_path)
+            
+            if cccd:
+                # Kiểm tra tính hợp lệ của CCCD
+                validation_result = self.validate_cccd(cccd)
+                
+                if validation_result == "Hợp lệ":
+                    messagebox.showinfo("Thành công", "CCCD hợp lệ!")
+                else:
+                    messagebox.showerror("Lỗi", validation_result)  # Thông báo lý do không hợp lệ
+            else:
+                messagebox.showerror("Lỗi", "Không thể trích xuất CCCD từ ảnh.")
+
+    def extract_cccd_from_image(self, image_path):
+        """Trích xuất số CCCD từ ảnh sử dụng OCR"""
+        img = Image.open(image_path)
+        text = pytesseract.image_to_string(img)
+        
+        # Sử dụng regex để tìm số CCCD trong văn bản
+        match = re.search(r'\d{12}', text)
+        
+        if match:
+            return match.group(0)
+        else:
+            return None
+
+    def validate_cccd(self, cccd):
+        """Kiểm tra tính hợp lệ của CCCD dựa trên quy định"""
+        # Kiểm tra độ dài số CCCD phải là 12 chữ số
+        if len(cccd) != 12 or not cccd.isdigit():
+            return "Số CCCD phải gồm 12 chữ số!"
+
+        # 1. Kiểm tra mã tỉnh (3 chữ số đầu tiên từ 001 đến 096)
+        province_code = int(cccd[:3])
+        if not (1 <= province_code <= 96):
+            return "Mã tỉnh không hợp lệ!"
+
+        # 2. Kiểm tra mã thế kỷ và giới tính (chữ số thứ 4)
+        century_gender = int(cccd[3])
+        if century_gender not in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]:
+            return "Mã thế kỷ hoặc giới tính không hợp lệ!"
+        
+        # 3. Kiểm tra mã năm sinh (2 chữ số tiếp theo)
+        birth_year_code = int(cccd[4:6])
+        if not (0 <= birth_year_code <= 99):
+            return "Mã năm sinh không hợp lệ!"
+
+        # 4. Kiểm tra 6 chữ số cuối (số ngẫu nhiên)
+        random_code = cccd[6:]
+        if not random_code.isdigit():
+            return "Mã ngẫu nhiên không hợp lệ!"
+        
+        return "Hợp lệ"  # Nếu tất cả các phần hợp lệ
+
+    def verify_cccd(self, cccd):
+        """Gọi API xác thực CCCD"""
+        response = requests.post(
+            f"{BASE_URL}/verify-cccd", 
+            json={"cccd": cccd}
         )
         
-        db.users.update_one(
-            {"username": username},
-            {"$set": {
-                "password": new_hashed_password.hex(),
-                "salt": new_salt.hex()
-            }}
-        )
-        
-        return jsonify({"message": "Password changed successfully"}), 200
-        
-    except jwt.ExpiredSignatureError:
-        return jsonify({"error": "Token expired"}), 401
-    except jwt.InvalidTokenError:
-        return jsonify({"error": "Invalid token"}), 401
-    
-@app.route("/verify-cccd", methods=["POST"])
-def verify_cccd():
-    data = request.get_json()
-    cccd = data.get("cccd")
-    
-    if not cccd:
-        return jsonify({"error": "Số CCCD không hợp lệ"}), 400
-    
-    # Kiểm tra tính hợp lệ của CCCD theo quy định
-    validation_result = validate_cccd(cccd)
-    if validation_result == "Hợp lệ":
-        return jsonify({"message": "CCCD hợp lệ!"}), 200
-    else:
-        return jsonify({"error": validation_result}), 400
+        if response.status_code == 200:
+            messagebox.showinfo("Thành công", "CCCD hợp lệ!")
+            self.show_main_screen()
+        else:
+            messagebox.showerror("Lỗi", response.json().get("error", "Không hợp lệ"))
 
-def validate_cccd(cccd):
-    # Kiểm tra độ dài số CCCD phải là 12 chữ số
-    if len(cccd) != 12 or not cccd.isdigit():
-        return "Số CCCD phải gồm 12 chữ số!"
-    
-    # 1. Kiểm tra mã tỉnh (3 chữ số đầu tiên từ 001 đến 096)
-    province_code = int(cccd[:3])
-    if not (1 <= province_code <= 96):
-        return "Mã tỉnh không hợp lệ!"
+    def clear_screen(self):
+        """Xóa toàn bộ widget hiện có"""
+        for widget in self.root.winfo_children():
+            widget.destroy()
 
-    # 2. Kiểm tra mã thế kỷ và giới tính (chữ số thứ 4)
-    century_gender = int(cccd[3])
-    if century_gender not in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]:
-        return "Mã thế kỷ hoặc giới tính không hợp lệ!"
-    
-    # 3. Kiểm tra mã năm sinh (2 chữ số tiếp theo)
-    birth_year_code = int(cccd[4:6])
-    if not (0 <= birth_year_code <= 99):
-        return "Mã năm sinh không hợp lệ!"
 
-    # 4. Kiểm tra 6 chữ số cuối (số ngẫu nhiên)
-    random_code = cccd[6:]
-    if not random_code.isdigit():
-        return "Mã ngẫu nhiên không hợp lệ!"
-    
-    return "Hợp lệ"    
+
 if __name__ == "__main__":
-    app.run(port=3000, debug=True)
+    root = tk.Tk()
+    app = AuthFlowApp(root)
+    root.mainloop()
