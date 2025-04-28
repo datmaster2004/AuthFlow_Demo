@@ -4,8 +4,10 @@ from datetime import datetime, timedelta
 import jwt  
 import smtplib
 from email.mime.text import MIMEText
+from twilio.rest import Client
+
 app = Flask(__name__)
-app.config["SECRET_KEY"] = "your-secret-key-123"  
+app.config["SECRET_KEY"] = "Hai_la_s0_1"  
 
 client = pymongo.MongoClient("mongodb://localhost:27017/")
 db = client["authflow_demo"]
@@ -15,6 +17,13 @@ EMAIL_CONFIG = {
     'smtp_server': 'smtp.gmail.com',
     'smtp_port': 587
 }
+
+TWILIO_ACCOUNT_SID = "AC9edd7213e48058ec7fd5747cf08530c5"
+TWILIO_AUTH_TOKEN = "a2514a624067bf60a3ccd234087514b5"
+TWILIO_VERIFY_SERVICE_SID = "VA34ccf4aa3f2c0365be87d57b7a17d5dd"
+
+twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+
 @app.route("/register", methods=["POST"])
 def register():
     data = request.get_json()
@@ -33,7 +42,7 @@ def register():
     # Lưu tạm thông tin
     db.temp_users.insert_one({
         "username": data["username"],
-        "password": data["password"],  
+        "password": data["password"],  # Lưu tạm chưa hash
         "fullname": data["fullname"],
         "phone": data["phone"],
         "email": data["email"],
@@ -156,6 +165,71 @@ def verify_otp():
 
     except Exception as e:
         return jsonify({"error": f"Lỗi server: {str(e)}"}), 500
+    
+@app.route("/send-phone-otp", methods=["POST"])
+def send_phone_otp():
+    token = request.headers.get("Authorization")
+    if not token or not token.startswith("Bearer "):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    try:
+        token = token.split(" ")[1]
+        payload = jwt.decode(token, app.config["SECRET_KEY"], algorithms=["HS256"])
+        username = payload["username"]
+
+        user = db.users.find_one({"username": username})
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+
+        phone = user.get("phone")
+        if not phone:
+            return jsonify({"error": "Chưa có số điện thoại"}), 400
+
+        verification = twilio_client.verify.services(TWILIO_VERIFY_SERVICE_SID).verifications.create(
+            to=phone,
+            channel='sms'
+        )
+
+        return jsonify({"message": "OTP đã gửi tới số điện thoại"}), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/verify-phone-otp", methods=["POST"])
+def verify_phone_otp():
+    token = request.headers.get("Authorization")
+    if not token or not token.startswith("Bearer "):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    try:
+        data = request.get_json()
+        entered_otp = data.get("otp")
+
+        token = token.split(" ")[1]
+        payload = jwt.decode(token, app.config["SECRET_KEY"], algorithms=["HS256"])
+        username = payload["username"]
+
+        user = db.users.find_one({"username": username})
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+
+        phone = user.get("phone")
+
+        verification_check = twilio_client.verify.services(TWILIO_VERIFY_SERVICE_SID).verification_checks.create(
+            to=phone,
+            code=entered_otp
+        )
+
+        if verification_check.status == "approved":
+            return jsonify({"message": "Xác nhận số điện thoại thành công!"}), 200
+        else:
+            return jsonify({"error": "OTP không đúng"}), 400
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+            
 @app.after_request
 def after_request(response):
     response.headers.add('Access-Control-Allow-Origin', '*')
@@ -234,5 +308,47 @@ def change_password():
         return jsonify({"error": "Token expired"}), 401
     except jwt.InvalidTokenError:
         return jsonify({"error": "Invalid token"}), 401
+    
+@app.route("/verify-cccd", methods=["POST"])
+def verify_cccd():
+    data = request.get_json()
+    cccd = data.get("cccd")
+    
+    if not cccd:
+        return jsonify({"error": "Số CCCD không hợp lệ"}), 400
+    
+    # Kiểm tra tính hợp lệ của CCCD theo quy định
+    validation_result = validate_cccd(cccd)
+    if validation_result == "Hợp lệ":
+        return jsonify({"message": "CCCD hợp lệ!"}), 200
+    else:
+        return jsonify({"error": validation_result}), 400
+
+def validate_cccd(cccd):
+    # Kiểm tra độ dài số CCCD phải là 12 chữ số
+    if len(cccd) != 12 or not cccd.isdigit():
+        return "Số CCCD phải gồm 12 chữ số!"
+    
+    # 1. Kiểm tra mã tỉnh (3 chữ số đầu tiên từ 001 đến 096)
+    province_code = int(cccd[:3])
+    if not (1 <= province_code <= 96):
+        return "Mã tỉnh không hợp lệ!"
+
+    # 2. Kiểm tra mã thế kỷ và giới tính (chữ số thứ 4)
+    century_gender = int(cccd[3])
+    if century_gender not in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]:
+        return "Mã thế kỷ hoặc giới tính không hợp lệ!"
+    
+    # 3. Kiểm tra mã năm sinh (2 chữ số tiếp theo)
+    birth_year_code = int(cccd[4:6])
+    if not (0 <= birth_year_code <= 99):
+        return "Mã năm sinh không hợp lệ!"
+
+    # 4. Kiểm tra 6 chữ số cuối (số ngẫu nhiên)
+    random_code = cccd[6:]
+    if not random_code.isdigit():
+        return "Mã ngẫu nhiên không hợp lệ!"
+    
+    return "Hợp lệ"    
 if __name__ == "__main__":
     app.run(port=3000, debug=True)
