@@ -5,7 +5,7 @@ import jwt
 import smtplib
 from email.mime.text import MIMEText
 app = Flask(__name__)
-app.config["SECRET_KEY"] = "Hai_la_s0_1"  
+app.config["SECRET_KEY"] = "your-secret-key-123"  
 
 client = pymongo.MongoClient("mongodb://localhost:27017/")
 db = client["authflow_demo"]
@@ -33,7 +33,7 @@ def register():
     # Lưu tạm thông tin
     db.temp_users.insert_one({
         "username": data["username"],
-        "password": data["password"],  # Lưu tạm chưa hash
+        "password": data["password"],  
         "fullname": data["fullname"],
         "phone": data["phone"],
         "email": data["email"],
@@ -108,6 +108,7 @@ def login():
         "token": token,
         "username": username  
     }), 200
+@app.route("/verify-otp", methods=["POST"])
 def verify_otp():
     try:
         data = request.get_json()
