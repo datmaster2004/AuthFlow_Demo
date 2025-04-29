@@ -19,7 +19,7 @@ EMAIL_CONFIG = {
 }
 
 TWILIO_ACCOUNT_SID = "AC9edd7213e48058ec7fd5747cf08530c5"
-TWILIO_AUTH_TOKEN = "a2514a624067bf60a3ccd234087514b5"
+TWILIO_AUTH_TOKEN = "25a573f24620cc38ae3b456a4c72df89"
 TWILIO_VERIFY_SERVICE_SID = "VA34ccf4aa3f2c0365be87d57b7a17d5dd"
 
 twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
@@ -39,13 +39,17 @@ def register():
     otp_secret = pyotp.random_base32()
     otp = pyotp.TOTP(otp_secret).now()
     
-    # Lưu tạm thông tin
+    # Lưu tạm thông tin và thêm các trường xác thực
     db.temp_users.insert_one({
         "username": data["username"],
         "password": data["password"],  # Lưu tạm chưa hash
         "fullname": data["fullname"],
         "phone": data["phone"],
         "email": data["email"],
+        "cccd": None,
+        "cccd_verified": False,  # Thêm trường xác thực CCCD
+        "email_verified": False,  # Thêm trường xác thực email
+        "phone_verified": False,  # Thêm trường xác thực SĐT
         "otp": otp,
         "expires_at": datetime.now() + timedelta(minutes=5)
     })
@@ -54,6 +58,7 @@ def register():
     send_otp(data["email"], otp)
 
     return jsonify({"message": "OTP đã được gửi đến email"}), 200
+
 def send_otp(email, otp):
     try:
         msg = MIMEText(f'Mã OTP của bạn là: {otp}\nMã có hiệu lực trong 5 phút.')
@@ -140,7 +145,7 @@ def verify_otp():
         if not record:
             return jsonify({"error": "OTP không hợp lệ hoặc hết hạn"}), 400
 
-        # Hash password và lưu user
+        # Hash password và lưu user vào cơ sở dữ liệu chính
         salt = os.urandom(16)
         hashed_password = hashlib.pbkdf2_hmac(
             "sha256",
@@ -155,7 +160,11 @@ def verify_otp():
             "salt": salt.hex(),
             "fullname": record["fullname"],
             "phone": record["phone"],
-            "email": record["email"]
+            "email": record["email"],
+            "cccd": None,
+            "cccd_verified": False,  # Lưu trạng thái CCCD
+            "email_verified": True,  # Lưu trạng thái email
+            "phone_verified": False,  # Lưu trạng thái SĐT
         })
 
         # Xóa bản ghi tạm
@@ -222,6 +231,10 @@ def verify_phone_otp():
         )
 
         if verification_check.status == "approved":
+            db.users.update_one(
+                {"username": username},
+                {"$set": {"phone_verified": True}}  # Chỉ cập nhật phone_verified
+            )
             return jsonify({"message": "Xác nhận số điện thoại thành công!"}), 200
         else:
             return jsonify({"error": "OTP không đúng"}), 400
@@ -250,14 +263,18 @@ def get_profile():
         user = db.users.find_one({"username": username}, {"_id": 0, "password": 0, "salt": 0})
         if not user:
             return jsonify({"error": "User not found"}), 404
-            
+
+        # Thêm trạng thái xác thực vào dữ liệu người dùng
+        user["cccd_verified"] = "Đã xác thực" if user.get("cccd_verified") else "Chưa xác thực"
+        user["email_verified"] = "Đã xác thực" if user.get("email_verified") else "Chưa xác thực"
+        user["phone_verified"] = "Đã xác thực" if user.get("phone_verified") else "Chưa xác thực"
+
         return jsonify(user), 200
         
     except jwt.ExpiredSignatureError:
         return jsonify({"error": "Token expired"}), 401
     except jwt.InvalidTokenError:
         return jsonify({"error": "Invalid token"}), 401
-
 
 @app.route("/change-password", methods=["POST"])
 def change_password():
@@ -317,10 +334,21 @@ def verify_cccd():
     if not cccd:
         return jsonify({"error": "Số CCCD không hợp lệ"}), 400
     
-    # Kiểm tra tính hợp lệ của CCCD theo quy định
+    # Kiểm tra tính hợp lệ của CCCD
     validation_result = validate_cccd(cccd)
+
     if validation_result == "Hợp lệ":
-        return jsonify({"message": "CCCD hợp lệ!"}), 200
+        # Cập nhật vào cơ sở dữ liệu
+        username = data.get("username")
+        print(f"CCCD nhận được: {username}")
+        db.users.update_one(
+            {"username": username},
+            {"$set": {
+                "cccd": cccd,  # Lưu số CCCD
+                "cccd_verified": True  # Cập nhật trạng thái CCCD thành đã xác thực
+            }}
+        )
+        return jsonify({"message": "CCCD đã được xác thực!"}), 200
     else:
         return jsonify({"error": validation_result}), 400
 
