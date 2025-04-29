@@ -282,7 +282,7 @@ class AuthFlowApp:
         """Màn hình xem thông tin cá nhân"""
         self.clear_screen()
         
-        # Gọi API lấy thông tin user (cần implement endpoint /profile trong server)
+        # Gọi API lấy thông tin user
         response = requests.get(
             f"{BASE_URL}/profile",
             headers={"Authorization": f"Bearer {self.current_token}"}
@@ -293,12 +293,16 @@ class AuthFlowApp:
             
             tk.Label(self.root, text="THÔNG TIN CÁ NHÂN", font=("Arial", 14)).pack(pady=10)
             
-            # Hiển thị thông tin
+            # Hiển thị thông tin cá nhân và trạng thái xác thực
             info_labels = [
                 f"Tên đăng nhập: {user_data.get('username', '')}",
                 f"Họ và tên: {user_data.get('fullname', '')}",
                 f"Email: {user_data.get('email', '')}",
-                f"Số điện thoại: {user_data.get('phone', '')}"
+                f"Số điện thoại: {user_data.get('phone', '')}",
+                f"CCCD: {user_data.get('cccd', 'Chưa xác thực')}",
+                f"Trạng thái xác thực CCCD: {user_data.get('cccd_verified', 'Chưa xác thực')}",
+                f"Trạng thái xác thực Email: {user_data.get('email_verified', 'Chưa xác thực')}",
+                f"Trạng thái xác thực SĐT: {user_data.get('phone_verified', 'Chưa xác thực')}"
             ]
             
             for label_text in info_labels:
@@ -497,7 +501,7 @@ class AuthFlowApp:
                 validation_result = self.validate_cccd(cccd)
                 
                 if validation_result == "Hợp lệ":
-                    messagebox.showinfo("Thành công", "CCCD hợp lệ!")
+                    self.handle_verify_cccd(cccd)
                 else:
                     messagebox.showerror("Lỗi", validation_result)  # Thông báo lý do không hợp lệ
             else:
@@ -515,6 +519,15 @@ class AuthFlowApp:
             return match.group(0)
         else:
             return None
+
+    def handle_verify_cccd(self, cccd):
+        """Xử lý xác minh CCCD"""
+        response, status_code = self.verify_cccd(cccd)
+        if status_code == 200:
+            messagebox.showinfo("Thành công", "CCCD đã được xác thực!")
+            self.show_home_screen()  # Cập nhật thông tin sau khi xác thực thành công
+        else:
+            messagebox.showerror("Lỗi", response.get("error", "Xác thực CCCD thất bại"))
 
     def validate_cccd(self, cccd):
         """Kiểm tra tính hợp lệ của CCCD dựa trên quy định"""
@@ -545,17 +558,27 @@ class AuthFlowApp:
         return "Hợp lệ"  # Nếu tất cả các phần hợp lệ
 
     def verify_cccd(self, cccd):
-        """Gọi API xác thực CCCD"""
-        response = requests.post(
-            f"{BASE_URL}/verify-cccd", 
-            json={"cccd": cccd}
-        )
+        """Gửi yêu cầu xác minh CCCD tới server"""
+        headers = {
+            "Authorization": f"Bearer {self.current_token}",
+            "Content-Type": "application/json"
+        }
         
-        if response.status_code == 200:
-            messagebox.showinfo("Thành công", "CCCD hợp lệ!")
-            self.show_main_screen()
-        else:
-            messagebox.showerror("Lỗi", response.json().get("error", "Không hợp lệ"))
+        # Dữ liệu gửi đi là số CCCD
+        data = {
+            "cccd": cccd,
+            "username": self.current_username  # Nếu cần, truyền username cùng với CCCD
+        }
+        
+        try:
+            # Gửi yêu cầu POST tới server để xác minh CCCD
+            response = requests.post(f"{BASE_URL}/verify-cccd", headers=headers, json=data)
+            
+            # Trả về dữ liệu phản hồi từ server
+            return response.json(), response.status_code
+        
+        except requests.exceptions.RequestException as e:
+            return {"error": f"Connection error: {str(e)}"}, 500
 
     def clear_screen(self):
         """Xóa toàn bộ widget hiện có"""
