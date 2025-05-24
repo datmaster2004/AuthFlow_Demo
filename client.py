@@ -112,6 +112,26 @@ class AuthFlowApp:
             height=2
         ).pack(pady=10)
 
+        tk.Button(
+            self.root, text="Xem thông tin chia sẻ", 
+            command=self.show_shared_code_entry_screen, 
+            width=20, height=2
+        ).pack(pady=10)
+
+    def show_shared_code_entry_screen(self):
+        self.clear_screen()
+
+        tk.Label(self.root, text="XEM THÔNG TIN CHIA SẺ", font=("Arial", 14)).pack(pady=10)
+        tk.Label(self.root, text="Nhập mã chia sẻ (6 chữ số):").pack(pady=5)
+
+        self.share_code_entry = tk.Entry(self.root, width=20)
+        self.share_code_entry.pack(pady=10)
+
+        tk.Button(self.root, text="Xác nhận", command=self.handle_check_shared_code, width=15).pack(pady=10)
+
+        tk.Button(self.root, text="Quay lại", command=self.show_main_screen, width=10).pack(pady=5)
+
+
     def show_register_screen(self):
         self.clear_screen()
         
@@ -265,6 +285,14 @@ class AuthFlowApp:
             height=2
         ).pack(pady=10)
         
+        tk.Button(
+            self.root,
+            text="Chia sẻ thông tin",
+            command=self.handle_share_info,
+            width=20,
+            height=2
+        ).pack(pady=10)
+
         # Nút đăng xuất
         tk.Button(
             self.root,
@@ -464,6 +492,61 @@ class AuthFlowApp:
 
         tk.Button(otp_window, text="Xác thực", command=submit_otp).pack(pady=10)
 
+    def handle_check_shared_code(self):
+        code = self.share_code_entry.get()
+
+        if not code.isdigit() or len(code) != 6:
+            messagebox.showerror("Lỗi", "Mã chia sẻ không hợp lệ.")
+            return
+
+        try:
+            response = requests.get(f"{BASE_URL}/shared-info/{code}")
+
+            if response.status_code == 200:
+                self.shared_user_data = response.json() 
+                print("DỮ LIỆU TRẢ VỀ:", self.shared_user_data)  
+                self.show_shared_info_screen()
+            else:
+                try:
+                    error_msg = response.json().get("error", "Không tìm thấy hoặc mã đã hết hạn")
+                except ValueError:
+                    error_msg = "Lỗi định dạng dữ liệu trả về từ server."
+                messagebox.showerror("Lỗi", error_msg)
+
+        except Exception as e:
+            messagebox.showerror("Lỗi", f"Không thể kết nối đến server: {str(e)}")
+    
+    def show_shared_info_screen(self):
+        self.clear_screen()
+
+        user_data = self.shared_user_data  # Đây là dữ liệu của người đã chia sẻ
+
+        tk.Label(self.root, text="THÔNG TIN NGƯỜI DÙNG (ĐÃ CHIA SẺ)", font=("Arial", 14, "bold")).pack(pady=10)
+        tk.Label(self.root, text=f"(Dữ liệu được chia sẻ bởi người dùng: {user_data.get('username', '')})", fg="gray").pack(pady=5)
+
+        info_labels = [
+            f"Tên đăng nhập: {user_data.get('username', '')}",
+            f"Họ và tên: {user_data.get('fullname', '')}",
+            f"Email: {user_data.get('email', '')}",
+            f"Số điện thoại: {user_data.get('phone', '')}",
+            f"CCCD: {user_data.get('cccd', 'Chưa xác thực')}",
+            f"Trạng thái xác thực CCCD: {user_data.get('cccd_verified', 'Chưa xác thực')}",
+            f"Trạng thái xác thực Email: {user_data.get('email_verified', 'Chưa xác thực')}",
+            f"Trạng thái xác thực SĐT: {user_data.get('phone_verified', 'Chưa xác thực')}"
+        ]
+
+        for label_text in info_labels:
+            tk.Label(self.root, text=label_text, font=("Arial", 12)).pack(anchor="w", padx=20, pady=5)
+
+        tk.Button(
+            self.root,
+            text="Quay lại",
+            command=self.show_main_screen,
+            width=15
+        ).pack(pady=20)
+
+
+
     def show_cccd_verification_screen(self):
         """Màn hình tải ảnh và xác nhận CCCD"""
         self.clear_screen()
@@ -579,6 +662,35 @@ class AuthFlowApp:
         
         except requests.exceptions.RequestException as e:
             return {"error": f"Connection error: {str(e)}"}, 500
+        
+    def generate_share_code(self):
+        response = requests.post(
+            f"{BASE_URL}/generate-share-code",
+            headers={"Authorization": f"Bearer {self.current_token}"}
+        )
+        return response.json(), response.status_code
+
+    def handle_share_info(self):
+        response, status_code = self.generate_share_code()
+        if status_code == 200:
+            code = response["share_code"]
+            # Hiển thị và nút copy
+            share_window = tk.Toplevel(self.root)
+            share_window.title("Mã chia sẻ thông tin")
+            share_window.geometry("300x150")
+            
+            tk.Label(share_window, text=f"Mã chia sẻ: {code}", font=("Arial", 14)).pack(pady=10)
+
+            def copy_to_clipboard():
+                self.root.clipboard_clear()
+                self.root.clipboard_append(code)
+                self.root.update()
+                messagebox.showinfo("Đã sao chép", "Mã đã được sao chép vào clipboard.")
+
+            tk.Button(share_window, text="Copy", command=copy_to_clipboard).pack(pady=10)
+        else:
+            messagebox.showerror("Lỗi", response.get("error", "Không thể tạo mã chia sẻ."))
+
 
     def clear_screen(self):
         """Xóa toàn bộ widget hiện có"""
