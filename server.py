@@ -3,6 +3,7 @@ import pymongo, hashlib, os, pyotp
 from datetime import datetime, timedelta
 import jwt  
 import smtplib
+import random
 from email.mime.text import MIMEText
 from twilio.rest import Client
 
@@ -334,23 +335,107 @@ def verify_cccd():
     if not cccd:
         return jsonify({"error": "Số CCCD không hợp lệ"}), 400
     
-    # Kiểm tra tính hợp lệ của CCCD
-    validation_result = validate_cccd(cccd)
+    # Kiểm tra token từ header
+    token = request.headers.get("Authorization")
+    if not token or not token.startswith("Bearer "):
+        return jsonify({"error": "Unauthorized, Token missing or invalid"}), 401
+    
+    try:
+        # Lấy token từ "Bearer <token>"
+        token = token.split(" ")[1]
+        payload = jwt.decode(token, app.config["SECRET_KEY"], algorithms=["HS256"])
+        
+        # Lấy username từ payload
+        username = payload.get("username")
+        
+        if not username:
+            return jsonify({"error": "Username không có trong token"}), 401
+        
+        # Kiểm tra CCCD
+        validation_result = validate_cccd(cccd)
+        if validation_result == "Hợp lệ":
+            # Cập nhật vào cơ sở dữ liệu
+            db.users.update_one(
+                {"username": username},
+                {"$set": {
+                    "cccd": cccd,  # Lưu số CCCD
+                    "cccd_verified": True  # Cập nhật trạng thái CCCD thành đã xác thực
+                }}
+            )
+            return jsonify({"message": "CCCD đã được xác thực!"}), 200
+        else:
+            return jsonify({"error": validation_result}), 400
+    except jwt.ExpiredSignatureError:
+        return jsonify({"error": "Token expired"}), 401
+    except jwt.InvalidTokenError:
+        return jsonify({"error": "Invalid token"}), 401
 
-    if validation_result == "Hợp lệ":
-        # Cập nhật vào cơ sở dữ liệu
-        username = data.get("username")
-        print(f"CCCD nhận được: {username}")
-        db.users.update_one(
-            {"username": username},
-            {"$set": {
-                "cccd": cccd,  # Lưu số CCCD
-                "cccd_verified": True  # Cập nhật trạng thái CCCD thành đã xác thực
-            }}
-        )
-        return jsonify({"message": "CCCD đã được xác thực!"}), 200
-    else:
-        return jsonify({"error": validation_result}), 400
+
+@app.route("/generate-share-code", methods=["POST"])
+def generate_share_code():
+    token = request.headers.get("Authorization")
+    if not token or not token.startswith("Bearer "):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    try:
+        token = token.split(" ")[1]
+        payload = jwt.decode(token, app.config["SECRET_KEY"], algorithms=["HS256"])
+        username = payload["username"]
+
+        # Tạo mã 6 chữ số
+        share_code = f"{random.randint(100000, 999999)}"
+
+        # Lưu vào DB
+        db.share_codes.insert_one({
+            "username": username,
+            "code": share_code,
+            "expires_at": datetime.now() + timedelta(minutes=5)
+        })
+
+        return jsonify({"share_code": share_code}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    
+@app.route("/shared-info/<code>", methods=["GET"])
+def get_shared_info(code):
+    if not code.isdigit() or len(code) != 6:
+        return jsonify({"error": "Mã không hợp lệ"}), 400
+
+    record = db.share_codes.find_one({"code": code})
+    if not record:
+        return jsonify({"error": "Không tìm thấy mã chia sẻ"}), 404
+
+    if datetime.now() > record["expires_at"]:
+        return jsonify({"error": "Mã chia sẻ đã hết hạn"}), 410
+
+    username = record["username"]
+
+    user = db.users.find_one(
+        {"username": username},
+        {
+            "_id": 0,
+            "username": 1,
+            "fullname": 1,
+            "email": 1,
+            "phone": 1,
+            "cccd": 1,
+            "cccd_verified": 1,
+            "email_verified": 1,
+            "phone_verified": 1
+        }
+    )
+
+    if not user:
+        return jsonify({"error": "Không tìm thấy người dùng"}), 404
+
+    # Format trạng thái xác thực
+    user["cccd_verified"] = "Đã xác thực" if user.get("cccd_verified") else "Chưa xác thực"
+    user["email_verified"] = "Đã xác thực" if user.get("email_verified") else "Chưa xác thực"
+    user["phone_verified"] = "Đã xác thực" if user.get("phone_verified") else "Chưa xác thực"
+
+    return jsonify(user), 200
+
+
 
 def validate_cccd(cccd):
     # Kiểm tra độ dài số CCCD phải là 12 chữ số
